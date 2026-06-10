@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <title>Metamaterials space</title>
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="128x128" href="favicon.png">
+<link rel="apple-touch-icon" href="favicon.png">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.0.36/dist.min.js"></script>
 <style>
@@ -260,7 +263,7 @@
 <div id="brand"><b>RESEARCH SPACE</b><span>local · openalex</span></div>
 
 
-<div id="mechToggle">Facets</div>
+<div id="mechToggle">Keywords</div>
 <div id="mechChips"></div>
 
 <div id="domLegend"></div>
@@ -597,7 +600,7 @@ async function init() {
     tog.onclick = () => box.classList.toggle('open');
     let curGroup = null, row = null;
     meta.mechanisms.forEach((m, bi) => {
-      const name = m.name || m, group = m.group || 'Facets';
+      const name = m.name || m, group = m.group || 'Keywords';
       if (group !== curGroup) {
         curGroup = group;
         const h = document.createElement('div');
