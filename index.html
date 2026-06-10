@@ -464,19 +464,12 @@ async function init() {
   const sec = location.pathname.includes('/metamaterials/') ? 'metamaterials' : 'space';
   document.querySelectorAll('#nav a').forEach(a =>
     a.classList.toggle('active', a.dataset.sec === sec));
-  const paperApi = meta.paperApi || null;   // e.g. '/api/wpaper?row='
   let contours = [];
   fetch('data/contours.json').then(r => r.ok ? r.json() : [])
     .then(c => { contours = c; refreshLayers(); }).catch(() => {});
 
   // static deployment (GitHub Pages) has no /api: talk to OpenAlex directly.
-  // meta.static is set true in the published data so we never probe a missing
-  // backend (a 404 from GitHub Pages would otherwise leave staticMode false).
-  let staticMode = meta.static === true;
-  if (!staticMode) try {
-    const probe = await fetch('/api/paper?id=W0', {method: 'GET'});
-    if (!probe.ok && probe.status !== 404) staticMode = true;
-  } catch (e) { staticMode = true; }
+  const staticMode = true;
   const [x0, y0, x1, y1] = meta.bbox;
   const W = x1 - x0, H = y1 - y0;
   const CX = (x0 + x1) / 2, CY = (y0 + y1) / 2;
@@ -750,32 +743,6 @@ async function init() {
     beaconLabels = labs;
   }
 
-  // ── basic paper info (in-view list) ──────────────────────────────
-  const paperCache = new Map();
-  async function getPaper(idNum) {
-    const key = idNum.toString();
-    let p = paperCache.get(key);
-    if (!p) {
-      if (staticMode) {
-        const w = await (await fetch(
-          `https://api.openalex.org/works/W${key}?select=id,title,publication_year,cited_by_count,primary_topic`)).json();
-        p = {
-          id: 'W' + key,
-          title: w.title || '',
-          year: w.publication_year,
-          citations: w.cited_by_count,
-          field: w.primary_topic?.field?.display_name || '',
-          subfield: w.primary_topic?.subfield?.display_name || '',
-          topic: w.primary_topic?.display_name || '',
-        };
-      } else {
-        p = await (await fetch('/api/paper?id=W' + key)).json();
-      }
-      paperCache.set(key, p);
-    }
-    return p;
-  }
-
   // ── GRS-style article card + pulse animation ─────────────────────
   let pinned = null;   // {x, y}
   let pulseT = 0, pulseRAF = null;
@@ -793,42 +760,17 @@ async function init() {
   async function getPaperFull(idStr) {
     let p = fullCache.get(idStr);
     if (p) return p;
-    if (paperApi) {       // section-specific local API (wave map)
-      try {
-        const r = await fetch(paperApi + idStr.replace(/^W/, ''));
-        if (!r.ok) throw new Error('api ' + r.status);
-        const b = await r.json();
-        p = { id: idStr, title: b.title, year: b.year, date: String(b.year || ''),
-              citations: b.citations || 0, fwci: null, type: 'paper',
-              venue: b.venue || '', authors: b.authors || [],
-              nAuthors: (b.authors || []).length,
-              topic: b.subfield || '', subfield: b.field || '', url: b.url || '',
-              abstract: b.abstract || '' };
-        fullCache.set(idStr, p);
-        return p;
-      } catch (e) {
-        // stale points.bin ↔ db rowids (post-cleanup): minimal card
-        // instead of a silent no-op click
-        return { id: idStr, title: 'Paper #' + idStr.replace(/^W/, '') +
-                 ' (details unavailable, map being rebuilt)',
-                 year: null, date: '', citations: 0, fwci: null, type: '',
-                 venue: '', authors: [], nAuthors: 0, topic: '',
-                 subfield: '', url: '', abstract: '' };
-      }
-    }
     // points carry themes.db rowids, not OpenAlex ids; resolve via the baked
     // per-point DOI so the static card can fetch the real OpenAlex record
     let oaId = idStr, pdix;
-    if (staticMode) {
-      await loadDois();
-      if (pointDois) {
-        try { pdix = getIdIndex().get(BigInt(idStr.slice(1))); } catch (e) {}
-        const doi = pdix !== undefined ? (pointDois[pdix] || '').trim() : '';
-        if (doi) oaId = 'doi:' + doi;
-      }
+    await loadDois();
+    if (pointDois) {
+      try { pdix = getIdIndex().get(BigInt(idStr.slice(1))); } catch (e) {}
+      const doi = pdix !== undefined ? (pointDois[pdix] || '').trim() : '';
+      if (doi) oaId = 'doi:' + doi;
     }
     try {   // OpenAlex direct: venue, authors, FWCI, date, type
-      if (staticMode && oaId === idStr) throw new Error('no doi');  // skip 404
+      if (oaId === idStr) throw new Error('no doi');  // skip 404
       const w = await (await fetch(
         `https://api.openalex.org/works/${oaId}?select=id,title,display_name,publication_year,publication_date,cited_by_count,fwci,type,authorships,primary_location,primary_topic`)).json();
       if (!w || !w.id) throw new Error('not found');
@@ -847,22 +789,11 @@ async function init() {
         subfield: w.primary_topic?.subfield?.display_name || '',
       };
     } catch (e) {   // no DOI / offline / budget: baked title-only card
-      const ttl = (staticMode && pointTitles && pdix !== undefined)
-        ? pointTitles[pdix] : '';
-      if (staticMode) {
-        p = { id: idStr, title: ttl || 'Untitled paper', year: null, date: '',
-              citations: pdix !== undefined && pointCits ? pointCits[pdix] : 0,
-              fwci: null, type: '', venue: '', authors: [], nAuthors: 0,
-              topic: '', subfield: '' };
-      } else {
-        try {
-          const b = await getPaper(BigInt(idStr.slice(1)));
-          p = { id: idStr, title: b.title, year: b.year, date: String(b.year),
-                citations: b.citations || 0, fwci: null, type: 'article',
-                venue: '', authors: [], nAuthors: 0,
-                topic: b.topic || '', subfield: b.subfield || '' };
-        } catch (e2) { return null; }
-      }
+      const ttl = (pointTitles && pdix !== undefined) ? pointTitles[pdix] : '';
+      p = { id: idStr, title: ttl || 'Untitled paper', year: null, date: '',
+            citations: pdix !== undefined && pointCits ? pointCits[pdix] : 0,
+            fwci: null, type: '', venue: '', authors: [], nAuthors: 0,
+            topic: '', subfield: '' };
     }
     fullCache.set(idStr, p);
     return p;
@@ -890,18 +821,7 @@ async function init() {
       const span = document.createElement('span');
       p.authors.slice(0, 8).forEach((name, i) => {
         if (i) span.appendChild(document.createTextNode(', '));
-        // author mode needs the local /api/wauthor; plain text in static
-        if (staticMode) {
-          span.appendChild(document.createTextNode(name));
-          return;
-        }
-        const a = document.createElement('a');
-        a.textContent = name;
-        a.href = '#';
-        a.style.cssText = 'color:#9fc3ff;text-decoration:none;cursor:pointer';
-        a.title = 'show all papers by this author';
-        a.onclick = (e) => { e.preventDefault(); authorMode(name); };
-        span.appendChild(a);
+        span.appendChild(document.createTextNode(name));
       });
       if (p.nAuthors > 8) span.appendChild(document.createTextNode(', …'));
       aDiv.appendChild(span);
@@ -996,23 +916,14 @@ async function init() {
     clearTimeout(hoverTimer);
     hoverFetchSeq++;                 // invalidate any in-flight fetch
   }
-  // fetch just the title for a hovered point (debounced, cached). Reuses
-  // the full-paper cache when the card has already loaded this paper.
+  // title for a hovered point: reuse the title cache or the full-paper cache
+  // when the card has already loaded this paper, else nothing (titles.txt
+  // already preloads every title, so this is only a cache reader in static).
   async function fetchHoverTitle(idStr, index, x, y) {
     const rowKey = idStr.replace(/^W/, '');
     if (titleCache.has(rowKey)) { return titleCache.get(rowKey); }
     if (fullCache.has(idStr)) { return fullCache.get(idStr).title; }
-    if (!paperApi) return null;
-    const seq = ++hoverFetchSeq;
-    try {
-      const r = await fetch(paperApi + rowKey);
-      if (!r.ok) throw new Error('api ' + r.status);
-      const b = await r.json();
-      const title = b.title || ('Paper #' + rowKey);
-      titleCache.set(rowKey, title);
-      if (seq !== hoverFetchSeq) return null;   // stale: pointer moved on
-      return title;
-    } catch (e) { return null; }
+    return null;
   }
   function onPaperHover(info) {
     if (!info || info.index < 0) { hideTip(); return; }
@@ -1054,26 +965,19 @@ async function init() {
   let authPos = null, authN = 0, authPath = null, authRows = null;
   async function authorMode(name) {
     try {
-      let rows;
-      if (staticMode) {
-        // baked authors.json: {surname: [[rowid, year], ...]}. Match on the
-        // query's last token (surname), exact then prefix.
-        await loadAuthors();
-        if (!authorIdx) return;
-        const toks = name.toLowerCase().replace(/[^\w]+/g, ' ').trim().split(' ');
-        const sn = toks[toks.length - 1];
-        let hits = authorIdx[sn];
-        if (!hits) {
-          hits = [];
-          for (const k in authorIdx)
-            if (k.startsWith(sn)) { hits = hits.concat(authorIdx[k]); if (hits.length > 2000) break; }
-        }
-        rows = (hits || []).map(([row, year]) => ({ row, year }));
-      } else {
-        const r = await (await fetch('/api/wauthor?q=' +
-          encodeURIComponent(name))).json();
-        rows = r.rows || [];
+      // baked authors.json: {surname: [[rowid, year], ...]}. Match on the
+      // query's last token (surname), exact then prefix.
+      await loadAuthors();
+      if (!authorIdx) return;
+      const toks = name.toLowerCase().replace(/[^\w]+/g, ' ').trim().split(' ');
+      const sn = toks[toks.length - 1];
+      let hits = authorIdx[sn];
+      if (!hits) {
+        hits = [];
+        for (const k in authorIdx)
+          if (k.startsWith(sn)) { hits = hits.concat(authorIdx[k]); if (hits.length > 2000) break; }
       }
+      const rows = (hits || []).map(([row, year]) => ({ row, year }));
       const index = getIdIndex();
       const pts = [];   // [x, y, year, rowid]
       for (const w of rows) {
@@ -1844,7 +1748,7 @@ async function init() {
   // static mode: lookup.bin maps the top-cited paper ids → map position
   let lkIds = null, lkX = null, lkY = null;
   async function loadLookup() {
-    if (lkIds || !staticMode) return;
+    if (lkIds) return;
     try {
       const buf = await (await fetch('data/lookup.bin')).arrayBuffer();
       const nlk = buf.byteLength / 12;
@@ -1877,20 +1781,6 @@ async function init() {
     return idIndex;
   }
   async function doSearch(q) {
-    if (meta.searchApi) {   // section-local search (metamaterials map)
-      const r = await (await fetch(meta.searchApi + encodeURIComponent(q))).json();
-      const index = getIdIndex();
-      return { results: (r.results || []).map(w => {
-        let i;
-        try { i = index.get(BigInt(w.id)); } catch { i = undefined; }
-        return { ...w, id: w.id,
-                 x: i !== undefined ? positions[i * 2] : null,
-                 y: i !== undefined ? positions[i * 2 + 1] : null };
-      })};
-    }
-    if (!staticMode) {
-      return (await (await fetch('/api/search?q=' + encodeURIComponent(q))).json());
-    }
     await loadLookup();
     const r = await (await fetch(
       'https://api.openalex.org/works?search=' + encodeURIComponent(q) +
@@ -1927,7 +1817,7 @@ async function init() {
     sClear.classList.toggle('show', sb.value.length > 0);
     if (q.length < 3) { srDiv.innerHTML = ''; return; }
     // author mode: "@name" or "author:name" highlights every paper
-    // by that author (local /api/wauthor only; off in static mode)
+    // by that author (baked authors.json, matched on surname)
     const am = q.match(/^(?:@|author:\s*)(.+)$/i);   // author mode (lazy-loads index)
     if (am && am[1].trim().length >= 3) {
       searchTimer = setTimeout(() => {
