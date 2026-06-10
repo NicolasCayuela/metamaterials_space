@@ -8,7 +8,7 @@ An interactive map of the metamaterials literature. Around 615,000 papers
 projected to 2D with UMAP. Every dot is a publication and neighbourhoods are
 research topics.
 
-**Live:** https://nicolascayuela.github.io/metamaterials-map/
+**Live:** https://nicolascayuela.github.io/metamaterials_space/
 
 ## The map
 
