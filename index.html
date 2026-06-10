@@ -816,10 +816,13 @@ async function init() {
     // points carry themes.db rowids, not OpenAlex ids; resolve via the baked
     // per-point DOI so the static card can fetch the real OpenAlex record
     let oaId = idStr, pdix;
-    if (staticMode && pointDois) {
-      try { pdix = getIdIndex().get(BigInt(idStr.slice(1))); } catch (e) {}
-      const doi = pdix !== undefined ? (pointDois[pdix] || '').trim() : '';
-      if (doi) oaId = 'doi:' + doi;
+    if (staticMode) {
+      await loadDois();
+      if (pointDois) {
+        try { pdix = getIdIndex().get(BigInt(idStr.slice(1))); } catch (e) {}
+        const doi = pdix !== undefined ? (pointDois[pdix] || '').trim() : '';
+        if (doi) oaId = 'doi:' + doi;
+      }
     }
     try {   // OpenAlex direct: venue, authors, FWCI, date, type
       if (staticMode && oaId === idStr) throw new Error('no doi');  // skip 404
@@ -928,13 +931,18 @@ async function init() {
   }).catch(() => {});
   // static deploy: DOI per point (click -> OpenAlex by doi) and an author ->
   // points index (author search without a backend). Both align to points.bin
-  // order; baked by scripts/big/bake_static.py.
-  let pointDois = null, authorIdx = null;
-  if (staticMode) {
-    fetch('data/dois.txt').then(r => r.ok ? r.text() : null)
+  // order; baked by scripts/big/bake_static.py. Lazy-loaded on first use so
+  // they don't add ~40 MB to every page load.
+  let pointDois = null, authorIdx = null, _doiP = null, _authP = null;
+  function loadDois() {
+    if (!_doiP) _doiP = fetch('data/dois.txt').then(r => r.ok ? r.text() : null)
       .then(t => { if (t) pointDois = t.split('\n'); }).catch(() => {});
-    fetch('data/authors.json').then(r => r.ok ? r.json() : null)
+    return _doiP;
+  }
+  function loadAuthors() {
+    if (!_authP) _authP = fetch('data/authors.json').then(r => r.ok ? r.json() : null)
       .then(j => { if (j) authorIdx = j; }).catch(() => {});
+    return _authP;
   }
   // real citation count per point (uint32, points.bin order). Used for the
   // tooltip AND the min-citations filter (the points.bin byte is too coarse
@@ -1047,6 +1055,7 @@ async function init() {
       if (staticMode) {
         // baked authors.json: {surname: [[rowid, year], ...]}. Match on the
         // query's last token (surname), exact then prefix.
+        await loadAuthors();
         if (!authorIdx) return;
         const toks = name.toLowerCase().replace(/[^\w]+/g, ' ').trim().split(' ');
         const sn = toks[toks.length - 1];
@@ -1916,7 +1925,7 @@ async function init() {
     if (q.length < 3) { srDiv.innerHTML = ''; return; }
     // author mode: "@name" or "author:name" highlights every paper
     // by that author (local /api/wauthor only; off in static mode)
-    const am = (!staticMode || authorIdx) && q.match(/^(?:@|author:\s*)(.+)$/i);
+    const am = q.match(/^(?:@|author:\s*)(.+)$/i);   // author mode (lazy-loads index)
     if (am && am[1].trim().length >= 3) {
       searchTimer = setTimeout(() => {
         srDiv.innerHTML = '';
@@ -1944,8 +1953,8 @@ async function init() {
           };
           srDiv.appendChild(el);
         }
-        // author-mode shortcut row (works on any query)
-        if (!staticMode || authorIdx) {
+        // author-mode shortcut row (works on any query; static lazy-loads)
+        {
           const ar = document.createElement('div');
           ar.className = 'sr';
           ar.innerHTML = `<div>👤 all papers by “${q}”</div>
