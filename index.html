@@ -472,6 +472,7 @@ async function init() {
   const staticMode = true;
   const [x0, y0, x1, y1] = meta.bbox;
   const W = x1 - x0, H = y1 - y0;
+  const MAP_BOUNDS = [x0, y0, x1, y1];      // shared, so layer props stay ===
   const CX = (x0 + x1) / 2, CY = (y0 + y1) / 2;
   // fit leaves room for the title bar; left panels float over the map edge
   const FIT = Math.log2(Math.min((innerWidth - 60) / W, (innerHeight - 130) / H));
@@ -583,14 +584,17 @@ async function init() {
     [192,255,92],[255,154,217]];
   const facetColor = bi => FACET_COLORS[bi % FACET_COLORS.length];
   if (meta.mechanisms && meta.mechanisms.length) {
-    fetch('data/mech.bin').then(r => r.ok ? r.arrayBuffer() : null).then(b => {
-      if (b) mechBits = (b.byteLength / meta.count >= 4)
-        ? new Uint32Array(b) : new Uint8Array(b);
-    }).catch(() => {});
+    // facet bits (2.4 MB) are only needed once the Keywords panel is used
+    let _mechP = null;
+    const loadMech = () => _mechP || (_mechP = fetch('data/mech.bin')
+      .then(r => r.ok ? r.arrayBuffer() : null).then(b => {
+        if (b) mechBits = (b.byteLength / meta.count >= 4)
+          ? new Uint32Array(b) : new Uint8Array(b);
+      }).catch(() => {}));
     const box = document.getElementById('mechChips');
     const tog = document.getElementById('mechToggle');
     tog.style.display = 'block';
-    tog.onclick = () => box.classList.toggle('open');
+    tog.onclick = () => { loadMech(); box.classList.toggle('open'); };
     let curGroup = null, row = null;
     meta.mechanisms.forEach((m, bi) => {
       const name = m.name || m, group = m.group || 'Keywords';
@@ -616,7 +620,7 @@ async function init() {
         el.style.borderColor = on ? `rgb(${cr},${cg},${cb})` : '';
         el.style.boxShadow = on ? `0 0 8px rgba(${cr},${cg},${cb},.4)` : '';
         tog.classList.toggle('active', mechMask !== 0);
-        rebuildMechOverlay();
+        loadMech().then(rebuildMechOverlay);
       };
       row.appendChild(el);
     });
@@ -760,7 +764,7 @@ async function init() {
       beaconCol[j * 4 + 2] = 205 - (1 - t) * 60;
       beaconCol[j * 4 + 3] = 225;
       beaconIdx[j] = i;
-      const ttl = pointTitles && pointTitles[i];
+      const ttl = titleOf(i);
       if (ttl) labs.push({ x: positions[i * 2], y: positions[i * 2 + 1],
                            t: shortTitle(ttl), cit: citB[i] });
       j++;
@@ -815,7 +819,8 @@ async function init() {
         subfield: w.primary_topic?.subfield?.display_name || '',
       };
     } catch (e) {   // no DOI / offline / budget: baked title-only card
-      const ttl = (pointTitles && pdix !== undefined) ? pointTitles[pdix] : '';
+      if (pdix !== undefined) await loadTitles(pdix);
+      const ttl = pdix !== undefined ? titleOf(pdix) || '' : '';
       p = { id: idStr, title: ttl || 'Untitled paper', year: null, date: '',
             citations: pdix !== undefined && pointCits ? pointCits[pdix] : 0,
             fwci: null, type: '', venue: '', authors: [], nAuthors: 0,
@@ -869,15 +874,29 @@ async function init() {
   // ── hover tooltip: lightweight title preview near the cursor ─────
   const tipEl = document.getElementById('hoverTip');
   const titleCache = new Map();      // rowid string -> title (or full paper)
-  // all titles pre-loaded, aligned with points.bin order -> instant hover
-  // (no per-hover API round-trip). Loaded lazily in the background.
-  let pointTitles = null;
-  fetch('data/titles.txt').then(r => r.ok ? r.text() : null).then(t => {
-    if (t) {
-      pointTitles = t.split('\n');
-      if (beaconN) { buildBeacons(); refreshLayers(); }  // names for giants
+  // titles, aligned with points.bin order, split in chunks of TITLE_CHUNK
+  // lines (tools/split_titles.py) and fetched on demand: one ~54 MB file was
+  // the biggest download of the page. points.bin is sorted by citations, so
+  // chunk 0 holds every beacon title and is the only one loaded up front.
+  const TITLE_CHUNK = 10_000;
+  const titleChunks = [];                // k -> string[] once loaded, Promise while loading
+  function titleOf(i) {
+    const c = titleChunks[(i / TITLE_CHUNK) | 0];
+    return Array.isArray(c) ? (c[i % TITLE_CHUNK] || '') : null;
+  }
+  function loadTitles(i) {
+    const k = (i / TITLE_CHUNK) | 0;
+    if (!titleChunks[k]) {
+      titleChunks[k] = fetch(`data/titles/${String(k).padStart(3, '0')}.txt`)
+        .then(r => r.ok ? r.text() : '')
+        .then(t => (titleChunks[k] = t ? t.split('\n') : []))
+        .catch(() => (titleChunks[k] = []));
     }
-  }).catch(() => {});
+    return Promise.resolve(titleChunks[k]);
+  }
+  loadTitles(0).then(() => {
+    if (beaconN) { buildBeacons(); refreshLayers(); }  // names for giants
+  });
   // static deploy: DOI per point (click -> OpenAlex by doi) and an author ->
   // points index (author search without a backend). Both align to points.bin
   // order; baked by scripts/big/bake_static.py. Lazy-loaded on first use so
@@ -943,8 +962,8 @@ async function init() {
     hoverFetchSeq++;                 // invalidate any in-flight fetch
   }
   // title for a hovered point: reuse the title cache or the full-paper cache
-  // when the card has already loaded this paper, else nothing (titles.txt
-  // already preloads every title, so this is only a cache reader in static).
+  // when the card has already loaded this paper, else nothing (title chunks
+  // in data/titles/ cover the static deploy; this is only a cache reader).
   async function fetchHoverTitle(idStr, index, x, y) {
     const rowKey = idStr.replace(/^W/, '');
     if (titleCache.has(rowKey)) { return titleCache.get(rowKey); }
@@ -963,9 +982,8 @@ async function init() {
     if (idx !== hoverIndex) {
       hoverIndex = idx;
       clearTimeout(hoverTimer);
-      // instant: titles.txt preloaded and aligned with points.bin order.
-      // Fallbacks: cache, then a debounced API fetch if titles not ready.
-      const instant = (pointTitles && pointTitles[idx]) ||
+      // instant when the title chunk is loaded; else fetch it (debounced)
+      const instant = titleOf(idx) ||
         titleCache.get(rowKey) ||
         (fullCache.has('W' + rowKey) ? fullCache.get('W' + rowKey).title : null);
       if (instant) {
@@ -974,12 +992,13 @@ async function init() {
         showTip(`<div class="ht-t">Paper #${rowKey}</div>` +
                 `<div class="ht-m">loading…</div>`, x, y);
         hoverTimer = setTimeout(async () => {
-          const title = await fetchHoverTitle('W' + rowKey, idx, x, y);
+          await loadTitles(idx);
+          const title = titleOf(idx) || await fetchHoverTitle('W' + rowKey, idx, x, y);
           if (hoverIndex === idx && title) {
             showTip(`<div class="ht-t">${title}</div>${metaLine}`,
                     tipLastX, tipLastY);
           }
-        }, 250);
+        }, 120);
       }
     } else {
       positionTip(x, y);            // same point: just follow the cursor
@@ -1305,7 +1324,7 @@ async function init() {
   const terrainLayer = (visible) => new TerrainLayer({
     id: 'terrain',
     elevationData: 'data/height.png',
-    texture: 'data/density_far.png',        // punchier skin for the mountains
+    texture: 'data/density_far.webp',        // punchier skin for the mountains
     bounds: TERRAIN_BOUNDS,
     elevationDecoder: TERRAIN_DECODER,
     meshMaxError: Math.min(W, H) / 700,     // fast mesh generation
@@ -1373,14 +1392,14 @@ async function init() {
     HAS_3D && terrainLayer(false), // hidden: keeps the 3D mesh warm (only if 3D is offered)
     new BitmapLayer({
       id: 'density-far',          // contrasty smoothed nebula for dezoom
-      bounds: [x0, y0, x1, y1],
-      image: 'data/density_far.png',
+      bounds: MAP_BOUNDS,
+      image: 'data/density_far.webp',
       opacity: authDim * (filterActive() ? 0 : 1) * Math.max(0, Math.min(1, (1.4 - dz) / 1.2)),
     }),
     new BitmapLayer({
       id: 'density',
-      bounds: [x0, y0, x1, y1],
-      image: 'data/density.png',
+      bounds: MAP_BOUNDS,
+      image: 'data/density.webp',
       opacity: authDim * (filterActive() ? 0 : 1) * Math.max(0, Math.min(1, (dz - 0.2) / 1.2)),
     }),
     new PathLayer({
@@ -1470,8 +1489,8 @@ async function init() {
     }),
     (meta.domainColors) && new BitmapLayer({
       id: 'domain-halos',               // translucent KDE halos per domain
-      bounds: [x0, y0, x1, y1],
-      image: 'data/domains.png',
+      bounds: MAP_BOUNDS,
+      image: 'data/domains.webp',
       // filters fade the halos proportionally to the surviving points
       // instead of cutting them off
       opacity: authDim * Math.max(0.25, Math.min(1, (2.2 - dz) / 1.4)) * visFrac,
