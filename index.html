@@ -668,10 +668,38 @@ async function init() {
       twSpeed[i] = 0.25 + Math.random() * 0.75;
     }
   }
-  let twT = 0;
-  function twinkleStep() {
+  // Every twinkle tick rebuilds the layers and redraws the whole map (all
+  // points), so it is the map's main idle cost. Off on weak devices (<=4 cores
+  // or <=4 GB), capped at 30 fps elsewhere, skipped when
+  // the page is hidden or the map sits in a display:none iframe (innerWidth 0,
+  // e.g. another homepage playground tab), and stepped down 30 -> 15 -> off
+  // when rAF shows the main thread is saturated (slow CPU / software GL).
+  let twT = 0, twFps = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4 ? 0 : 30, twDrawn = 0, twLast = 0, twEMA = 0, twMin = 1e9, twFrames = 0;
+  function twinkleStep(now) {
+    requestAnimationFrame(twinkleStep);
+    now = now || performance.now();
+    if (document.hidden || window.innerWidth === 0 || !twFps) { twLast = 0; return; }
+    if (twLast) {
+      const ms = now - twLast;
+      if (ms > 4 && ms < 500) {
+        if (ms < twMin) twMin = ms;
+        twEMA = twFrames ? twEMA * 0.95 + ms * 0.05 : ms;
+        twFrames += ms;                      // warm-up measured in ms, not frames
+        if (twFrames > 2500 && twEMA > 1.45 * twMin && twEMA > 21) {
+          twFps = twFps > 15 ? 15 : 0; twFrames = 0;
+          if (!twFps) {                      // off: clear the sparkles once
+            twColors.fill(0); tw3Col && tw3Col.fill(0);
+            twTick++; deckgl.setProps({ layers: makeLayers(currentZoom) });
+            return;
+          }
+        }
+      }
+    }
+    twLast = now;
+    if (now - twDrawn < 1000 / twFps - 2) return;
+    twDrawn = now;
+    twT = now * 0.001;                        // was +0.016 per 60 fps frame = seconds
     if (is3D && tw3N) {
-      twT += 0.016;
       for (let i = 0; i < tw3N; i++) {
         const s = Math.sin(twT * tw3Speed[i] + tw3Phase[i]);
         const a = s > 0.78 ? (s - 0.78) / 0.22 : 0;   // rare, sharp flashes
@@ -680,7 +708,6 @@ async function init() {
       twTick++;
       deckgl.setProps({ layers: makeLayers(currentZoom) });
     } else if (twN) {
-      twT += 0.016;
       const filt = filterActive();
       for (let i = 0; i < twN; i++) {
         // filters (years AND min-citations) hide twinkle stars exactly like
@@ -697,7 +724,6 @@ async function init() {
       twTick++;
       deckgl.setProps({ layers: makeLayers(currentZoom) });
     }
-    requestAnimationFrame(twinkleStep);
   }
 
   // ── citation beacons: the field's giants stay visible at any zoom ──
@@ -1265,17 +1291,25 @@ async function init() {
     }
   }
   // terrain mounted from startup (hidden in 2D): the mesh is generated once
-  // in the background, so toggling 3D is instant
+  // in the background, so toggling 3D is instant. TerrainLayer compares
+  // bounds / elevationDecoder by reference and re-fetches + re-meshes the
+  // terrain when they change, so they must be the same objects on every
+  // makeLayers() call (it runs per twinkle frame).
+  // the 3D toggle button may be absent from the UI: then skip the hidden
+  // terrain entirely (saves height.png + texture download and meshing)
+  const HAS_3D = !!document.getElementById('mode3d');
+  const TERRAIN_BOUNDS = [x0, y0, x1, y1];
+  const TERRAIN_DECODER = { rScaler: ZMAX / 255, gScaler: 0, bScaler: 0, offset: 0 };
+  // no specular: flat empty zones stay pitch black and melt into space
+  const TERRAIN_MATERIAL = { ambient: 0.42, diffuse: 0.95, shininess: 1, specularColor: [0, 0, 0] };
   const terrainLayer = (visible) => new TerrainLayer({
     id: 'terrain',
     elevationData: 'data/height.png',
     texture: 'data/density_far.png',        // punchier skin for the mountains
-    bounds: [x0, y0, x1, y1],
-    elevationDecoder: { rScaler: ZMAX / 255, gScaler: 0, bScaler: 0, offset: 0 },
+    bounds: TERRAIN_BOUNDS,
+    elevationDecoder: TERRAIN_DECODER,
     meshMaxError: Math.min(W, H) / 700,     // fast mesh generation
-    // no specular: flat empty zones stay pitch black and melt into space
-    material: { ambient: 0.42, diffuse: 0.95, shininess: 1,
-                specularColor: [0, 0, 0] },
+    material: TERRAIN_MATERIAL,
     visible,
   });
 
@@ -1336,7 +1370,7 @@ async function init() {
     // author search = spotlight: dim the nebula + base so the author's
     // highlighted points stand out
     const authDim = authN > 0 ? 0.22 : 1; return [
-    terrainLayer(false),          // hidden: keeps the 3D mesh warm
+    HAS_3D && terrainLayer(false), // hidden: keeps the 3D mesh warm (only if 3D is offered)
     new BitmapLayer({
       id: 'density-far',          // contrasty smoothed nebula for dezoom
       bounds: [x0, y0, x1, y1],
@@ -1677,7 +1711,7 @@ async function init() {
       initTwinkle(); buildBeacons(); clearInterval(twWait);
     }
   }, 500);
-  twinkleStep();
+  requestAnimationFrame(twinkleStep);
 
   function flyTo(x, y, zoom) {
     viewState = { ...viewState, target: [x, y, 0], zoom,
